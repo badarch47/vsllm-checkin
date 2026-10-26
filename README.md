@@ -31,6 +31,7 @@ Authorization: Bearer <访问令牌>
    | `VSLLM_ACCESS_TOKENS` | ✅ | 访问令牌；多账号用英文逗号分隔，如 `token1,token2` |
    | `VSLLM_BASE_URL` | ❌ | 站点地址，默认 `https://vsllm.cc`（支持其他 New API 站） |
    | `NOTIFY_URL` | ❌ | 推送地址，如 Server酱 `https://sctapi.ftqq.com/<SENDKEY>.send` |
+   | `WECOM_WEBHOOK_URL` | ❌ | 企业微信群机器人 Webhook 地址（设置了则优先于 `NOTIFY_URL`） |
    | `CF_COOKIE` | ❌ | 浏览器 Cloudflare 会话 Cookie（见下方说明） |
 
 3. 打开仓库 `Actions` 页，确认工作流已启用（Fork 的仓库默认可能禁用，需手动 Enable）。
@@ -66,6 +67,13 @@ VSLLM_ACCESS_TOKENS='token1,token2,token3' bash checkin.sh
 - Server酱：`https://sctapi.ftqq.com/<SENDKEY>.send`
 - Bark：`https://api.day.app/<DEVICE_KEY>/`
 - 企业微信机器人、钉钉自定义机器人等任何接受表单 POST 的地址
+
+### 企业微信群机器人（推荐）
+
+1. 在目标企业微信群 → 群设置 → 群机器人 → 添加机器人 → 新建，复制 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx`）
+2. 填到 Secret `WECOM_WEBHOOK_URL`（本地运行则设同名环境变量）
+3. 签到结束后向该群推送「签到汇总 + 各账号明细」文本消息
+4. 优先级：设置了 `WECOM_WEBHOOK_URL` 时走企业微信，未设置则回落 `NOTIFY_URL`；两者都为空时不推送
 
 ## Cloudflare 说明（重要）
 
