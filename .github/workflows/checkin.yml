@@ -17,6 +17,8 @@ jobs:
         env:
           VSLLM_ACCESS_TOKENS: ${{ secrets.VSLLM_ACCESS_TOKENS }}
           VSLLM_BASE_URL: ${{ secrets.VSLLM_BASE_URL }}
+          VSLLM_COOKIE: ${{ secrets.VSLLM_COOKIE }}
+          VSLLM_UA: ${{ secrets.VSLLM_UA }}
           NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
           CF_COOKIE: ${{ secrets.CF_COOKIE }}
