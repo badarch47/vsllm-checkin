@@ -216,6 +216,73 @@ def click_turnstile(page, timeout: int = 20) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- #
+# 抽奖插件「试试手气」（站点自带的 gwent 插件，翻牌抽卡）
+# --------------------------------------------------------------------------- #
+GWENT_STATUS = "/api/gwent/status"
+GWENT_DRAW = "/api/gwent/draw"
+
+_FETCH_JS = """async ({path, method}) => {
+    const r = await fetch(path, {
+        method,
+        headers: {'Content-Type': 'application/json'},
+        body: method === 'POST' ? '{}' : undefined,
+        credentials: 'include',
+    });
+    return {status: r.status, text: await r.text()};
+}"""
+
+
+def gwent_status(page) -> dict:
+    """读取抽奖状态：charges_current / extra_draws_left / next_charge_at 等。"""
+    res = page.evaluate(_FETCH_JS, {"path": GWENT_STATUS, "method": "GET"})
+    if res["status"] != 200:
+        return {}
+    try:
+        return (json.loads(res["text"]) or {}).get("data") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def gwent_draw_all(page, limit: int = 10) -> tuple[int, list[str], str]:
+    """把当前可用次数一次翻完。返回 (次数, 战果, 备注)。"""
+    status = gwent_status(page)
+    if not status:
+        return 0, [], "抽奖状态获取失败"
+    if not status.get("enabled"):
+        return 0, [], "站点未开启试试手气"
+
+    charges = int(status.get("charges_current") or 0)
+    extra = int(status.get("extra_draws_left") or 0)
+    available = min(charges + extra, limit)
+    if available <= 0:
+        return 0, [], "暂无可用次数"
+
+    prizes: list[str] = []
+    note = ""
+    for _ in range(available):
+        res = page.evaluate(_FETCH_JS, {"path": GWENT_DRAW, "method": "POST"})
+        try:
+            payload = json.loads(res["text"])
+        except Exception:  # noqa: BLE001
+            note = f"抽奖返回非 JSON（HTTP {res['status']}）"
+            break
+        if not payload.get("success"):
+            note = str(payload.get("message") or "抽奖失败")
+            break
+        data = payload.get("data") or {}
+        prize = data.get("prize") or {}
+        name = prize.get("name") or "未知"
+        quota = prize.get("quota")
+        label = f"{name}×{quota}" if quota else str(name)
+        rarity = prize.get("rarity")
+        if rarity:
+            label += f"({rarity})"
+        prizes.append(label)
+        page.wait_for_timeout(600)
+    return len(prizes), prizes, note
+
+
 def _launch_kwargs(profile_dir: str, headless: bool) -> dict:
     kwargs: dict = {
         "user_data_dir": os.path.abspath(profile_dir),
@@ -263,7 +330,7 @@ def login_flow(base: str, profile_dir: str, timeout: int = 300) -> int:
 
 
 def checkin_browser(base: str, account: Account, profile_dir: str, headless: bool,
-                    timeout: int = 90) -> Result:
+                    timeout: int = 90, draw: bool = True) -> Result:
     sync_playwright, driver = load_driver()
     if not sync_playwright:
         return Result(False, "未安装 playwright / patchright，无法使用浏览器模式")
@@ -304,7 +371,15 @@ def checkin_browser(base: str, account: Account, profile_dir: str, headless: boo
                 )
                 last_status, last_body = probe["status"], probe["body"]
                 if not is_challenge(last_status, {}, last_body):
-                    return judge(last_status, last_body)
+                    result = judge(last_status, last_body)
+                    # 质询已过，同一会话内接着翻牌（两者共用同一 cf_clearance）
+                    if draw and last_status != 401:
+                        count, prizes, note = gwent_draw_all(page)
+                        if count:
+                            result.message += f"｜翻牌 {count} 次：{'、'.join(prizes)}"
+                        elif note and note != "暂无可用次数":
+                            result.message += f"｜翻牌：{note}"
+                    return result
                 click_turnstile(page, timeout=6)
                 page.wait_for_timeout(1500)
 
@@ -396,6 +471,7 @@ def main() -> int:
         "--headless", action="store_true", default=os.environ.get("VSLLM_HEADLESS") == "1"
     )
     parser.add_argument("--login", action="store_true", help="打开浏览器手动登录一次并保存登录态")
+    parser.add_argument("--no-draw", action="store_true", help="只签到，不翻牌抽卡")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -442,7 +518,10 @@ def main() -> int:
         if args.mode in ("auto", "solver") and solver_url:
             result = checkin_solver(base, account, solver_url)
         else:
-            result = checkin_browser(base, account, profile_dir, args.headless, browser_timeout)
+            result = checkin_browser(
+                base, account, profile_dir, args.headless, browser_timeout,
+                draw=not args.no_draw,
+            )
 
         results.append((account, result))
         print(f"  → {'✅' if result.ok else '⚠️'} {result.message}")

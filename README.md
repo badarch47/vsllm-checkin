@@ -53,27 +53,47 @@ python checkin.py --login
 
 会弹出浏览器窗口，正常登录 vsllm.cc（含真人验证）。脚本检测到 `session` Cookie 后自动保存到 `.vsllm-profile/`，**之后不需要再手动复制任何 Cookie**。
 
-### 3. 每天签到
+### 3. 每天签到 + 翻牌抽卡
 
 ```bash
-python checkin.py
+python checkin.py              # 签到，然后把「试试手气」的可用次数翻完
+python checkin.py --no-draw    # 只签到，不翻牌
 ```
 
-未登录态下会先走一次直连（很快），遇到质询自动切到浏览器模式。
+翻牌走站点自带的 gwent 插件：
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/gwent/status` | GET | 返回 `charges_current` / `charges_max` / `extra_draws_left` / `next_charge_at` 等 |
+| `/api/gwent/draw` | POST | 翻牌，**无请求体**；返回 `data.prize`（`name`/`quota`/`rarity`）与 `data.decoys` |
+
+实测这两个接口**同样被 Cloudflare 质询**，且质询按路径下发。但 `cf_clearance` 在通过一次后对整个域名生效，所以脚本在过验证后紧接着翻牌，不会触发第二次验证：
+
+```
+[11:47] Profile账号：签到中 -> https://vsllm.cc/api/user/checkin
+  → ✅ 签到成功...｜翻牌 2 次：金卡×5.0(legendary)、银卡×1.0(rare)
+```
+
+没有可用次数时会跳过（`charges_current + extra_draws_left = 0`），冷却 2 小时恢复 1 次。
 
 ### 4. 挂成 Windows 计划任务
 
-`C:\vsllm-checkin.ps1`（UTF-8 保存）：
+`C:\vsllm-checkin\run.ps1`（UTF-8 保存）：
 
 ```powershell
-Set-Location 'C:\path\to\vsllm-checkin'
-python checkin.py >> 'C:\vsllm-checkin.log' 2>&1
+Set-Location 'C:\vsllm-checkin'
+& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python315\python.exe' `
+    'C:\vsllm-checkin\checkin.py' --debug *>> 'C:\vsllm-checkin\logs\run.log'
 ```
 
-`Win+R` → `taskschd.msc` → 创建基本任务 → 每天 01:00 → 启动程序：
-程序 `powershell.exe`，参数 `-ExecutionPolicy Bypass -File C:\vsllm-checkin.ps1`。
+注册任务（每天 09:00）：
 
-> 计划任务里**不要**加 `--headless`。无头浏览器几乎必被拦。
+```powershell
+schtasks /create /tn "vsllm-checkin" /sc DAILY /st 09:00 /f `
+  /tr "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\vsllm-checkin\run.ps1"
+```
+
+> 计划任务里**不要**加 `--headless`，且必须勾选「只在用户登录时运行」——无头浏览器几乎必被拦，而且需要交互桌面。
 
 ---
 
