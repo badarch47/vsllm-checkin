@@ -1,25 +1,48 @@
 name: vsllm 每日签到
 
+# 说明：vsllm.cc 对 /api/user/checkin 下发了 Cloudflare 托管质询。
+# GitHub Actions 的出口是 Azure 数据中心 IP，会被直接判定为自动化，
+# 浏览器也会卡在「正在验证…」。因此本工作流只在以下两种情况有意义：
+#   1) 站点取消了对该路径的质询（概率低）；
+#   2) 你配置了住宅/家宽出口（自建 solver + 代理），见 README「方式三」。
+# 常规使用建议改到本机计划任务运行，见 README「方式二」。
+
 on:
   schedule:
-    # 北京时间每天 01:00 执行（cron 为 UTC 17:00，对应前一天）
+    # 北京时间每天 01:00（cron 为 UTC 17:00）
     - cron: "0 17 * * *"
   workflow_dispatch: {}
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 安装 Chromium
+        run: python -m playwright install --with-deps chromium
 
       - name: 执行签到
         env:
           VSLLM_ACCESS_TOKENS: ${{ secrets.VSLLM_ACCESS_TOKENS }}
           VSLLM_BASE_URL: ${{ secrets.VSLLM_BASE_URL }}
           VSLLM_COOKIE: ${{ secrets.VSLLM_COOKIE }}
-          VSLLM_UA: ${{ secrets.VSLLM_UA }}
+          VSLLM_SOLVER_URL: ${{ secrets.VSLLM_SOLVER_URL }}
+          VSLLM_PROFILE_DIR: .vsllm-profile
           NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
-          CF_COOKIE: ${{ secrets.CF_COOKIE }}
-        run: bash checkin.sh
+        # 无头必被拦，用 xvfb 提供虚拟显示跑有头模式
+        run: xvfb-run -a python checkin.py --debug

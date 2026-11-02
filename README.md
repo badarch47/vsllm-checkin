@@ -1,138 +1,192 @@
 # vsllm-checkin · vsllm.cc 每日自动签到
 
-基于 New API 网关标准签到接口的每日自动签到项目，支持**多账号、多站点**，开箱即用 **GitHub Actions** 每天定时执行，可选 Server酱/Bark 推送结果。
-
-## 原理
-
-vsllm.cc 由开源项目 [New API](https://github.com/QuantumNous/new-api) 搭建，签到走的是标准接口：
+基于 [New API](https://github.com/QuantumNous/new-api) 标准签到接口的每日签到工具，支持多账号、企业微信/Server酱通知，**并处理了 vsllm.cc 在签到接口上单独设置的 Cloudflare 人机验证**。
 
 ```
 POST https://vsllm.cc/api/user/checkin
 ```
 
-认证二选一（脚本自动处理）：
+---
 
-- **访问令牌**：`Authorization: Bearer <访问令牌>`（适合网络未被质询时，支持多账号）
-- **浏览器 Cookie 串**：`Cookie: cf_clearance=...; session=...`（适合被 Cloudflare 质询时，见下方说明）
+## 先说结论（实测，2026-11）
 
-每天只能签到一次，奖励为平台设定的随机额度，发放到账户余额，到账可能有延迟。
+| 结论 | 依据 |
+|---|---|
+| Cloudflare 质询**只针对 `/api/user/checkin`** | `/api/status` → 200，`POST /api/user/login` → 200，`POST /v1/chat/completions` → 401；而 `GET`/`POST /api/user/checkin` 均 403 + `Cf-Mitigated: challenge` |
+| 换 UA、补齐浏览器请求头**无效** | Chrome UA + 全套 `Sec-Fetch-*`/`Sec-CH-UA` 仍 403。这不是指纹判断，是路径规则 |
+| `cf_clearance` **不可移植** | 浏览器刚通过验证拿到 `cf_clearance` 后，同一 IP、同一 UA、同一秒内用 curl 回放 → 403；用 `curl_cffi` 模拟 `chrome`/`chrome131`/`chrome124`/`safari` 四种 TLS 指纹 → **全部 403** |
+| 可疑 IP 上会升级为**交互式 Turnstile** | 数据中心/代理 IP 打开质询页显示「请验证您是真人」勾选框；点击后 4 秒通过 |
+| 通过后**只有那个浏览器实例**能发请求 | 同实例内 `fetch` → 401（已到 New API 后端，说明质询已过） |
 
-## 获取访问令牌（关键！）
+**所以：** 把 `cf_clearance` 塞进 curl 的老路子，在本机、同 UA、同 IP 条件下也不成立。正确做法只有一个——**让浏览器自己发这个 POST**。本项目按此重构。
 
-1. 登录 https://vsllm.cc
-2. 进入「个人资料」→「安全设置」→「访问令牌」
-3. 点击「生成新令牌」并复制
+---
 
-> ⚠️ **注意**：这里用的「访问令牌」是个人资料页安全设置里生成的**账户级令牌**，不是「令牌」页里以 `sk-` 开头的 API Key，两者不能混用。若改用方式 B 的浏览器 Cookie 模式，则无需此令牌。
+## 三种路径怎么选
 
-## 方式一：GitHub Actions 每日自动签到（推荐）
+| 路径 | 命令 | 适用 | 成本 |
+|---|---|---|---|
+| **A. 本机浏览器（推荐）** | `python checkin.py --mode browser` | 家里电脑 / NAS，有真实家宽 IP | 免费，一次装依赖，之后每日静默通过 |
+| **B. 自建 solver** | `python checkin.py --mode solver` | 需要跑在服务器上，且能配住宅代理 | 一台常驻机器 + Docker（Byparr / FlareSolverr） |
+| **C. 直连** | `python checkin.py --mode direct` | 站点取消质询，或你的网络未被判定为自动化 | 免费、零依赖，但当前对 vsllm.cc 基本无效 |
 
-1. 把本项目推送到自己的 GitHub 仓库（可先 Fork）。
-2. 进入仓库 `Settings → Secrets and variables → Actions → New repository secret`，添加：
+GitHub Actions 属于**数据中心 IP + 无显示器**，A 走不通、C 走不通，只有配了住宅出口的 B 才有意义。
 
-   | Secret 名称 | 必填 | 说明 |
-   |---|---|---|
-   | `VSLLM_ACCESS_TOKENS` | ✅ | 访问令牌；多账号用英文逗号分隔，如 `token1,token2` |
-   | `VSLLM_BASE_URL` | ❌ | 站点地址，默认 `https://vsllm.cc`（支持其他 New API 站） |
-   | `NOTIFY_URL` | ❌ | 推送地址，如 Server酱 `https://sctapi.ftqq.com/<SENDKEY>.send` |
-   | `WECOM_WEBHOOK_URL` | ❌ | 企业微信群机器人 Webhook 地址（设置了则优先于 `NOTIFY_URL`） |
-   | `VSLLM_COOKIE` | ❌ | 浏览器完整 Cookie 串（含 `cf_clearance`、`session` 等），被 Cloudflare 拦截时用 |
-   | `VSLLM_UA` | ❌ | 浏览器 User-Agent，须与签发 Cookie 的浏览器一致 |
-   | `CF_COOKIE` | ❌ | `VSLLM_COOKIE` 的兼容别名（旧配置仍可用） |
+---
 
-3. 打开仓库 `Actions` 页，确认工作流已启用（Fork 的仓库默认可能禁用，需手动 Enable）。
-4. 点击 `vsllm 每日签到 → Run workflow` 手动测试一次，或直接等定时任务：**每天北京时间 01:00** 自动执行。
+## 快速开始（方式 A：本机，推荐）
 
-> ⚠️ **GitHub Actions 对被 Cloudflare 质询的站点基本不可行**：无论加几个 Cookie（`cf_clearance` 等）都会因出口 IP 与签发时不匹配而被拦，见「Cloudflare 说明」。被质询时请改用方式三本机定时任务。
-
-## 方式二：本地运行
-
-**方式 A：访问令牌**
+### 1. 安装
 
 ```bash
-VSLLM_ACCESS_TOKENS='你的访问令牌' bash checkin.sh
+python -m pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
-**方式 B：浏览器完整 Cookie 串（被 Cloudflare 拦截时用）**
+> 想让通过率更高，把 `requirements.txt` 里的 `playwright` 换成 `patchright`（打过反检测补丁的分支，本项目会自动优先使用它）。
+
+### 2. 登录一次（登录态存进浏览器 profile）
 
 ```bash
-VSLLM_COOKIE='cf_clearance=...; session=...' VSLLM_UA='你的浏览器UA' bash checkin.sh
+python checkin.py --login
 ```
 
-Windows PowerShell 方式 B：
+会弹出浏览器窗口，正常登录 vsllm.cc（含真人验证）。脚本检测到 `session` Cookie 后自动保存到 `.vsllm-profile/`，**之后不需要再手动复制任何 Cookie**。
+
+### 3. 每天签到 + 翻牌抽卡
+
+```bash
+python checkin.py              # 签到，然后把「试试手气」的可用次数翻完
+python checkin.py --no-draw    # 只签到，不翻牌
+```
+
+翻牌走站点自带的 gwent 插件：
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/gwent/status` | GET | 返回 `charges_current` / `charges_max` / `extra_draws_left` / `next_charge_at` 等 |
+| `/api/gwent/draw` | POST | 翻牌，**无请求体**；返回 `data.prize`（`name`/`quota`/`rarity`）与 `data.decoys` |
+
+实测这两个接口**同样被 Cloudflare 质询**，且质询按路径下发。但 `cf_clearance` 在通过一次后对整个域名生效，所以脚本在过验证后紧接着翻牌，不会触发第二次验证：
+
+```
+[11:47] Profile账号：签到中 -> https://vsllm.cc/api/user/checkin
+  → ✅ 签到成功...｜翻牌 2 次：金卡×5.0(legendary)、银卡×1.0(rare)
+```
+
+没有可用次数时会跳过（`charges_current + extra_draws_left = 0`），冷却 2 小时恢复 1 次。
+
+### 4. 挂成 Windows 计划任务
+
+`C:\vsllm-checkin\run.ps1`（UTF-8 保存）：
 
 ```powershell
-$env:VSLLM_COOKIE='cf_clearance=...; session=...'
-$env:VSLLM_UA='你的浏览器UA'
-bash checkin.sh
+Set-Location 'C:\vsllm-checkin'
+& 'C:\Users\Administrator\AppData\Local\Programs\Python\Python315\python.exe' `
+    'C:\vsllm-checkin\checkin.py' --debug *>> 'C:\vsllm-checkin\logs\run.log'
 ```
 
-## 方式三：本机定时任务（Windows，被 Cloudflare 拦截时的首选）
+注册任务（每天 09:00）：
 
-1. 先把方式 B 本地跑通。
-2. 把运行命令写成 `C:\vsllm-checkin.ps1`（UTF-8 编码）：
-
-   ```powershell
-   $env:VSLLM_COOKIE='cf_clearance=...; session=...'
-   $env:VSLLM_UA='你的浏览器UA'
-   bash 'C:\Users\Administrator\Doubao\chats\2026-10-26\new-chat\vsllm-checkin\checkin.sh'
-   ```
-
-3. `Win+R` → `taskschd.msc` → 创建基本任务 → 触发器「每天 01:00」→ 操作「启动程序」：程序填 `powershell.exe`，参数填 `-ExecutionPolicy Bypass -File C:\vsllm-checkin.ps1`。
-4. Cookie 过期后（见下方说明）重新提取并更新 ps1 文件即可。
-
-## 多账号
-
-`VSLLM_ACCESS_TOKENS` 用英文逗号分隔多个令牌即可，脚本会逐个签到并汇总结果：
-
-```
-VSLLM_ACCESS_TOKENS='token1,token2,token3' bash checkin.sh
+```powershell
+schtasks /create /tn "vsllm-checkin" /sc DAILY /st 09:00 /f `
+  /tr "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\vsllm-checkin\run.ps1"
 ```
 
-## 结果通知
+> 计划任务里**不要**加 `--headless`，且必须勾选「只在用户登录时运行」——无头浏览器几乎必被拦，而且需要交互桌面。
 
-设置 `NOTIFY_URL` 后，签到结束会向该地址 POST `title` / `desp` 表单。支持：
+---
 
-- Server酱：`https://sctapi.ftqq.com/<SENDKEY>.send`
-- Bark：`https://api.day.app/<DEVICE_KEY>/`
-- 企业微信机器人、钉钉自定义机器人等任何接受表单 POST 的地址
+## 方式 B：自建 solver（FlareSolverr / Byparr）
 
-### 企业微信群机器人（推荐）
+思路是把「打开浏览器 → 过验证 → 发请求」这整套交给一个常驻服务，脚本只调它的 API。因为请求由 solver 的浏览器发出，天然不存在 Cookie 移植问题。
 
-1. 在目标企业微信群 → 群设置 → 群机器人 → 添加机器人 → 新建，复制 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx`）
-2. 填到 Secret `WECOM_WEBHOOK_URL`（本地运行则设同名环境变量）
-3. 签到结束后向该群推送「签到汇总 + 各账号明细」文本消息
-4. 优先级：设置了 `WECOM_WEBHOOK_URL` 时走企业微信，未设置则回落 `NOTIFY_URL`；两者都为空时不推送
+```bash
+# Byparr（Camoufox 内核，2026 年基准测试通过率最高）
+docker run -d --name byparr -p 8191:8191 --shm-size=512m ghcr.io/thephaseless/byparr
 
-## Cloudflare 说明（重要）
+# 或 FlareSolverr（更老牌，速度更快）
+docker run -d --name flaresolverr -p 8191:8191 -e LOG_LEVEL=info ghcr.io/flaresolverr/flaresolverr
+```
 
-实测 vsllm.cc 对**非浏览器客户端**启用 Cloudflare 托管质询（"Just a moment..."）：普通 curl 直接访问 `/api/user/checkin` 会返回 403 质询页，脚本已内置识别并在日志中明确提示。
+```bash
+export VSLLM_COOKIE='session=...'          # 至少要有 session
+export VSLLM_SOLVER_URL='http://127.0.0.1:8191'
+python checkin.py --mode solver
+```
 
-### 为什么加了 cf_clearance 还是被拦？
+注意两点：
 
-- `cf_clearance` 与**签发它的 IP 和 User-Agent 绑定**：谁解决了质询，这个 Cookie 就只对该 IP + 浏览器 UA 有效。
-- GitHub Actions 每次运行都换一个 Azure 数据中心出口 IP，与你在家浏览器签发的 `cf_clearance` 不匹配 → **必然被拦**。把截图里所有 Cookie（`aff`、`cf_clearance`、`newapi_vid`、`session`）都加上也没用，这是站点边缘策略，不是登录问题。
-- 因此被质询时，**本机跑才可行**（本机 IP 与浏览器一致）。本机 Cookie 模式关键只有两个：`cf_clearance`（过 Cloudflare）+ `session`（登录态），其余非必需。
+1. solver 的出口 IP 决定成败。放在数据中心，一样被判定自动化，需要给它配住宅代理。
+2. FlareSolverr 的 `/v1` 协议不支持自定义请求头，所以 **solver 模式只支持 Cookie 认证**，Bearer 令牌走不通。
 
-### 提取浏览器完整 Cookie 串（含 HttpOnly）
+---
 
-`session` 和 `cf_clearance` 都是 HttpOnly，`document.cookie` 拿不到，要用下面方法：
+## 方式 C：直连（无质询时）
 
-1. 浏览器登录 vsllm.cc
-2. F12 →「网络」→ 刷新页面，点击任意一条发往 `vsllm.cc` 的请求（如 `/api/user/self`）
-3. 右键 →「复制」→「Copy as cURL」
-4. 在命令里找到 `-H 'Cookie: ...'`，`Cookie:` 后到下一个 `'` 之间的整段就是完整 Cookie 串（形如 `cf_clearance=...; session=...; newapi_vid=...`）
-5. 顺便复制 `-H 'User-Agent: ...'` 的值填给 `VSLLM_UA`（必须与浏览器一致，否则 cf_clearance 失效）
+```bash
+# 访问令牌（多账号英文逗号分隔）
+VSLLM_ACCESS_TOKENS='token1,token2' python checkin.py --mode direct
 
-### Cookie 有效期
+# 或 Cookie
+VSLLM_COOKIE='session=...' python checkin.py --mode direct
+```
 
-- `cf_clearance`：通常几天到一个月，过期后需重新提取
-- `session`：约一个月（登录态），过期后需重新登录再提取
-- 建议在 Cookie 失效前定期更新 `VSLLM_COOKIE`；也可配合企业微信通知，失败时及时感知
+访问令牌在「个人资料 → 安全设置 → 访问令牌」生成，**不是** `sk-` 开头的 API Key。
+
+---
+
+## 环境变量
+
+| 变量 | 说明 |
+|---|---|
+| `VSLLM_ACCESS_TOKENS` | 访问令牌，多账号逗号分隔 |
+| `VSLLM_COOKIE` | 完整 Cookie 串（`session` 必需；`cf_clearance` 带了也没用，见上） |
+| `VSLLM_MODE` | `auto`(默认) / `direct` / `browser` / `solver` |
+| `VSLLM_PROFILE_DIR` | 浏览器 profile 目录，默认 `./.vsllm-profile` |
+| `VSLLM_HEADLESS` | `1` 开无头，默认 `0`（不建议开） |
+| `VSLLM_CHROME` | 指定 Chrome 可执行文件路径（用系统 Chrome 时填） |
+| `VSLLM_SOLVER_URL` | solver 地址，如 `http://127.0.0.1:8191` |
+| `VSLLM_BASE_URL` | 站点地址，默认 `https://vsllm.cc` |
+| `WECOM_WEBHOOK_URL` | 企业微信群机器人 Webhook（优先） |
+| `NOTIFY_URL` | 通用推送（Server酱 / Bark，表单 `title`/`desp`） |
+
+---
 
 ## 常见问题
 
-- **"今天已经签到过了，请明天再来"**：属正常响应，说明当天已签到，不算失败。
-- **提示需要人机验证（验证码）**：New API 支持对签到接口开启 Turnstile 人机验证，若站点启用了该策略，脚本无法自动通过，需在浏览器手动签到。
-- **脚本报"Cloudflare 拦截"**：Cookie 模式多为 `cf_clearance` 过期或 IP/UA 与签发时不匹配（GitHub Actions 出口 IP 不同则必然拦截，见上节）；令牌模式则确认当前网络是否被质询。查看运行日志确认是否出现 "Just a moment"。
-- **令牌失效**：重置访问令牌后需同步更新 `VSLLM_ACCESS_TOKENS`。
+**「今天已经签到过了」算失败吗？**
+不算。脚本识别`已经签到/已签到/明天再来`并计入成功。
+
+**为什么浏览器模式也提示质询未通过？**
+出口 IP 被判为高风险（机房、公共代理、频繁请求）。换家宽 IP，或降低运行频率。数据中心 IP 上，用付费打码也常常过不掉。
+
+**profile 会过期吗？**
+`session` 约一个月。过期后重跑一次 `--login` 即可，其它不用动。
+
+**能不能彻底不装浏览器？**
+当前站点策略下不能。所有「纯请求过 CF」的方案（`cloudscraper`、`curl_cffi`、自拼 `cf_clearance`）在这条路径上已验证无效。唯一例外是 `cfsolve` 这类项目——它复刻浏览器指纹并在请求层解 Turnstile，属于「不用浏览器但要逆向」，见下节。
+
+---
+
+## 附：相关开源项目（2026-11 状态）
+
+| 项目 | 形态 | 说明 |
+|---|---|---|
+| [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) | 自建服务 | 16k★，Selenium + undetected-chromedriver，`/v1` API，生态最成熟 |
+| [Byparr](https://github.com/ThePhaseless/Byparr) | 自建服务 | Camoufox 内核，API 与 FlareSolverr 完全兼容，可直接替换 |
+| [Theyka/Turnstile-Solver](https://github.com/Theyka/Turnstile-Solver) | 自建服务 | 959★，patchright + 模板匹配点选，专攻 Turnstile |
+| [cfsolve](https://github.com/chris124567/cfsolve) | CLI / Rust 库 | **纯请求**解 Turnstile 与质询页，返回 `cf_clearance`；需 Rust 构建 + 浏览器指纹 profile，2026-10 刚开源，成熟度待观察 |
+| [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) | Python 库 | Playwright 的反检测分支，本项目浏览器模式优先使用 |
+| [Camoufox](https://github.com/daijro/camoufox) | 浏览器 | Firefox 内核的反检测浏览器，配合 Playwright 使用 |
+| `cloudscraper` / `curl_cffi` | Python 库 | **对本场景无效**：前者只解旧版 IUAM，后者只改 TLS 指纹，而这里是路径规则 + 交互式验证 |
+
+---
+
+## 变更说明（相对旧版）
+
+- 质询判定从 `grep "Just a moment"` 改为 `HTTP 403 + Cf-Mitigated: challenge`，不再受语言/文案变化影响；
+- 删除「导出 cf_clearance 交给 curl」的错误指引，改为浏览器内发请求；
+- 新增 `--login` 持久化登录态，免去手工复制 Cookie；
+- 新增 solver 模式，兼容 FlareSolverr / Byparr；
+- `checkin.sh` 保留为转发壳，无 Python 环境时回落到纯 curl 实现。
