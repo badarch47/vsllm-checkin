@@ -1,0 +1,7 @@
+# 浏览器模式依赖（推荐路径）
+# patchright 是打过反检测补丁的 playwright 分支，成功率更高；不想用它就把两行互换。
+playwright>=1.45
+# patchright>=1.50
+
+# solver 模式（FlareSolverr / Byparr）只用标准库 HTTP 调用，无需额外依赖。
+# 直连模式同样零依赖。
