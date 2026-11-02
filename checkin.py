@@ -480,7 +480,10 @@ def main() -> int:
     cookie = (os.environ.get("VSLLM_COOKIE") or os.environ.get("CF_COOKIE") or "").strip()
     tokens = [t.strip() for t in os.environ.get("VSLLM_ACCESS_TOKENS", "").split(",") if t.strip()]
     solver_url = os.environ.get("VSLLM_SOLVER_URL", "").strip()
-    profile_dir = os.environ.get("VSLLM_PROFILE_DIR", ".vsllm-profile")
+    # 锚定到脚本所在目录，避免因当前工作目录不同而读写到不同的 profile
+    profile_dir = os.environ.get("VSLLM_PROFILE_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), ".vsllm-profile"
+    )
     browser_timeout = int(os.environ.get("VSLLM_BROWSER_TIMEOUT", "90"))
 
     if args.login:
