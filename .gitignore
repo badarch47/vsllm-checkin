@@ -1,0 +1,11 @@
+# 浏览器 profile（含 session / cf_clearance，切勿提交）
+.vsllm-profile/
+profile*/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行日志
+*.log
